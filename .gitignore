@@ -1,0 +1,17 @@
+venv1/
+venv/
+client/.vite/
+node_modules/
+dist/
+dist-ssr/
+*.local
+.claude/
+client/.env
+client/.env.local
+client/.env.*.local
+.pytest_cache/
+.env
+server/.env
+server/.env.example
+__pycache__/
+*.pyc
