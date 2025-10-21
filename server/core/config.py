@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     AWS_REGION: str = "us-east-1"
     S3_BUCKET_NAME: str = "linkbig-ht-06-f4"  # 실제 배포 시 override 필요
     USE_AWS_S3: bool = False
+    ENABLE_MOCK_API: bool = False
 
     # LLM
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-sonnet-20240229-v1:0"
@@ -61,6 +62,7 @@ class Settings(BaseSettings):
                 AWS_REGION=os.getenv("AWS_REGION", "us-east-1"),
                 S3_BUCKET_NAME=os.getenv("S3_BUCKET_NAME", "linkbig-ht-06-f4"),
                 USE_AWS_S3=os.getenv("USE_AWS_S3", "false").lower() == "true",
+                ENABLE_MOCK_API=os.getenv("ENABLE_MOCK_API", "false").lower() == "true",
                 BEDROCK_MODEL_ID=os.getenv(
                     "BEDROCK_MODEL_ID",
                     "anthropic.claude-3-sonnet-20240229-v1:0",
@@ -86,6 +88,7 @@ BEDROCK_REGION = settings.BEDROCK_REGION
 AWS_REGION = settings.AWS_REGION
 S3_BUCKET_NAME = settings.S3_BUCKET_NAME
 USE_AWS_S3 = settings.USE_AWS_S3
+ENABLE_MOCK_API = settings.ENABLE_MOCK_API
 
 BEDROCK_MODEL_ID = settings.BEDROCK_MODEL_ID
 OPENAI_API_KEY = settings.OPENAI_API_KEY
