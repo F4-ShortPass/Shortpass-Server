@@ -7,9 +7,12 @@ RAG Agent - JD 파싱 및 역량 정보 검색
 - 역량별 가중치 계산
 """
 
+import logging
 import json
 from typing import Dict, Any, List, Optional
 from ai.utils.llm_client import LLMClient
+
+logger = logging.getLogger(__name__)
 
 
 class RAGAgent:
@@ -55,6 +58,12 @@ class RAGAgent:
         """
         prompt = self._build_jd_parsing_prompt(job_description, job_title)
 
+        if not job_description or not job_description.strip():
+            logger.error("Empty job description provided to RAGAgent")
+            raise ValueError("Job description cannot be empty")
+
+        logger.info(f"Starting JD parsing for job_title='{job_title}' (text_length={len(job_description)})")
+
         try:
             response = await self.llm_client.ainvoke(prompt)
 
@@ -67,16 +76,20 @@ class RAGAgent:
             response_text = response_text.strip()
 
             parsed_data = json.loads(response_text)
+            logger.info(f"Successfully parsed JD for job_title='{job_title}'")
 
             # 검증 및 기본값 설정
-            return self._validate_parsed_data(parsed_data)
+            validated = self._validate_parsed_data(parsed_data)
+            logger.debug(f"Validated data: {list(validated.keys())}")
+            return validated
 
         except json.JSONDecodeError as e:
-            print(f"RAG Agent: JSON 파싱 실패 - {e}")
-            return self._get_default_parsed_data()
+            logger.error(f"JSON parsing failed for job_title='{job_title}': {str(e)}", exc_info=True)
+            logger.warning("Falling back to default parsed data")
+            raise ValueError(f"LLM returned invalid JSON: {str(e)}")
         except Exception as e:
-            print(f"RAG Agent: JD 파싱 실패 - {e}")
-            return self._get_default_parsed_data()
+            logger.error(f"JD parsing failed for job_title='{job_title}': {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to parse JD: {str(e)}")
 
     def _build_jd_parsing_prompt(
         self,
@@ -202,7 +215,7 @@ class RAGAgent:
 
         # dynamic_evaluation_criteria 검증 (정확히 5개)
         if len(validated["dynamic_evaluation_criteria"]) != 5:
-            print(f"RAG Agent: dynamic_evaluation_criteria가 {len(validated['dynamic_evaluation_criteria'])}개 - 5개로 조정")
+            logger.warning(f"dynamic_evaluation_criteria has {len(validated['dynamic_evaluation_criteria'])} items, adjusting to 5")
             criteria = validated["dynamic_evaluation_criteria"]
             if len(criteria) < 5:
                 # 부족하면 기본 항목 추가
@@ -215,9 +228,11 @@ class RAGAgent:
                 ]
                 while len(criteria) < 5:
                     criteria.append(default_criteria[len(criteria)])
+                logger.debug(f"Added {5 - len(validated['dynamic_evaluation_criteria'])} default criteria")
             else:
                 # 초과하면 상위 5개만
                 criteria = criteria[:5]
+                logger.debug(f"Trimmed criteria to 5 items")
             validated["dynamic_evaluation_criteria"] = criteria
 
         # competency_weights 검증 (합계 1.0)
@@ -226,16 +241,18 @@ class RAGAgent:
 
         # 누락된 키 확인
         if not all(key in weights for key in required_keys):
-            print("RAG Agent: competency_weights 누락 키 존재 - 기본값 사용")
+            missing_keys = [k for k in required_keys if k not in weights]
+            logger.warning(f"competency_weights missing keys: {missing_keys}, using default weights")
             validated["competency_weights"] = self._get_default_weights()
         else:
             # 합계 검증
             total = sum(weights.values())
             if abs(total - 1.0) > 0.01:
-                print(f"RAG Agent: competency_weights 합계 {total} - 정규화")
+                logger.warning(f"competency_weights sum is {total:.3f}, normalizing to 1.0")
                 validated["competency_weights"] = {
                     key: val / total for key, val in weights.items()
                 }
+                logger.debug(f"Normalized weights: {validated['competency_weights']}")
 
         return validated
 
