@@ -2,6 +2,7 @@
 """
 Applicant service for handling applicant-related business logic
 """
+import logging
 from sqlalchemy.orm import Session
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -10,6 +11,8 @@ from models.interview import Applicant, ResumeChunk
 from services.s3_service import S3Service
 from services.embedding_service import EmbeddingService
 from ai.parsers.resume_parser import ResumeParser
+
+logger = logging.getLogger(__name__)
 
 
 class ApplicantService:
@@ -52,8 +55,9 @@ class ApplicantService:
                 birth_year = int(birthdate.split('-')[0])
                 current_year = datetime.now().year
                 age = current_year - birth_year
-            except:
-                pass
+            except (ValueError, IndexError, AttributeError) as e:
+                logger.warning(f"Failed to parse birthdate '{birthdate}' for age calculation: {str(e)}")
+                # Continue without age - not critical
 
         # 이메일로 기존 지원자 확인
         existing_applicant = db.query(Applicant).filter(Applicant.email == email).first()
