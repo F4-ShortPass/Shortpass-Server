@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import time
 from fastapi import Request
+from core.config import settings
 
 # 로거 설정
 logger = logging.getLogger("uvicorn") # Re-insert logger definition
@@ -121,13 +122,18 @@ app.include_router(jd_persona.router, prefix="/api/v1", tags=["JD Persona"])
 app.include_router(job.router, prefix="/api/v1", tags=["Job"])
 app.include_router(evaluation_db.router, prefix="/api/v1", tags=["Evaluation"])
 app.include_router(jd_parser.router, prefix="/api/v1", tags=["JD Parser"])
-app.include_router(evaluation_mock.router, prefix="/api/v1", tags=["Mock Evaluations"])
 app.include_router(applicant.router, prefix="/api/v1", tags=["Applicant"])
 app.include_router(company.router, prefix="/api/v1", tags=["Company"])
 app.include_router(evaluation_stream.router, prefix="/api/v1", tags=["Evaluation Stream"])
 app.include_router(evaluation_result.router, prefix="/api/v1", tags=["Evaluation Result"])
 app.include_router(agent_logs.router, prefix="/api/v1", tags=["Agent Logs"])
 app.include_router(feedback.router, tags=["Feedback"])  # 🆕 Feedback Loop API
+
+if settings.ENABLE_MOCK_API:
+    logger.warning("Mock API routes enabled by configuration (ENABLE_MOCK_API=True)")
+    app.include_router(evaluation_mock.router, prefix="/api/v1", tags=["Mock Evaluations"])
+else:
+    logger.info("Mock API routes disabled (ENABLE_MOCK_API=False)")
 # app.include_router(interview_report.router, prefix="/api/v1", tags=["Interview Report"])
 # app.include_router(persona.router, prefix="/api/v1/personas", tags=["Persona"])
 # app.include_router(evaluation.router, prefix= "/api/v1", tags=["Evaluation"]) 
