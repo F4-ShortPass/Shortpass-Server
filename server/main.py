@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 # from api import interview, evaluation, job, applicant, company, persona, interview_report, jd_persona
-from api import interview, jd_persona, job, evaluation_db, jd_parser, evaluation_mock, company, applicant, evaluation_stream, evaluation_result, agent_logs
+from api import interview, jd_persona, job, evaluation_db, jd_parser, evaluation_mock, company, applicant, evaluation_stream, evaluation_result, agent_logs, feedback
 import json
 import logging # Import logging
 from pathlib import Path
@@ -127,6 +127,7 @@ app.include_router(company.router, prefix="/api/v1", tags=["Company"])
 app.include_router(evaluation_stream.router, prefix="/api/v1", tags=["Evaluation Stream"])
 app.include_router(evaluation_result.router, prefix="/api/v1", tags=["Evaluation Result"])
 app.include_router(agent_logs.router, prefix="/api/v1", tags=["Agent Logs"])
+app.include_router(feedback.router, tags=["Feedback"])  # 🆕 Feedback Loop API
 # app.include_router(interview_report.router, prefix="/api/v1", tags=["Interview Report"])
 # app.include_router(persona.router, prefix="/api/v1/personas", tags=["Persona"])
 # app.include_router(evaluation.router, prefix= "/api/v1", tags=["Evaluation"]) 

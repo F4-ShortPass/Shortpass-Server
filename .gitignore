@@ -15,3 +15,8 @@ server/.env
 server/.env.example
 __pycache__/
 *.pyc
+/client
+.node_modules
+*.md 
+*.sql
+*.pdf
