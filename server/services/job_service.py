@@ -2,6 +2,7 @@
 """
 Job 처리 서비스 - JD PDF 업로드 및 벡터화
 """
+import logging
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -16,6 +17,9 @@ from services.s3_service import S3Service
 from services.embedding_service import EmbeddingService
 from ai.parsers.jd_parser import JDParser
 from ai.utils.llm_client import LLMClient
+from ai.agents.rag_agent import RAGAgent
+
+logger = logging.getLogger(__name__)
 
 
 # ==================== Pydantic Models for Persona Generation ====================
@@ -47,8 +51,9 @@ class JobService:
         self.s3_service = S3Service()
         self.embedding_service = EmbeddingService()
         self.jd_parser = JDParser(chunk_size=1000, chunk_overlap=200)
-        # self.prompt_builder = ParsingPromptBuilder()  # 임시 비활성화
         self.llm_client = LLMClient()
+        self.rag_agent = RAGAgent(llm_client=self.llm_client)
+        logger.info("JobService initialized with RAG support")
 
     async def process_jd_pdf(
         self,
@@ -60,7 +65,15 @@ class JobService:
         company_url: str = None
     ) -> Job:
         """
-        JD PDF 전체 처리 플로우
+        JD PDF 전체 처리 플로우 (RAG 기반)
+
+        전체 플로우:
+        1. S3 업로드
+        2. PDF 파싱 및 청킹
+        3. RAG 역량 추출 (required_skills, competency_weights, evaluation_criteria)
+        4. 페르소나 생성 (RAG 결과 기반)
+        5. 임베딩 생성
+        6. DB 저장
 
         Args:
             db: 데이터베이스 세션
@@ -68,107 +81,132 @@ class JobService:
             file_name: 파일명
             company_id: 회사 ID
             title: 채용 공고 제목
+            company_url: 회사 URL (선택)
 
         Returns:
             Job: 생성된 Job 객체
 
         Raises:
-            Exception: 처리 실패 시
+            ValueError: 입력 검증 실패
+            RuntimeError: 처리 중 오류 발생
         """
-        try:
-            print(f"\n{'='*60}")
-            print(f"Starting JD PDF processing: {file_name}")
-            print(f"{'='*60}")
+        # Input validation
+        if not pdf_content or len(pdf_content) == 0:
+            logger.error("Empty PDF content provided")
+            raise ValueError("PDF content cannot be empty")
 
+        if not file_name or not file_name.strip():
+            logger.error("Invalid file name provided")
+            raise ValueError("File name cannot be empty")
+
+        logger.info(f"Starting JD PDF processing: file={file_name}, company_id={company_id}")
+
+        try:
             # 1. S3에 PDF 업로드
-            print("\n[Step 1/5] Uploading PDF to S3...")
-            s3_key = self.s3_service.upload_file(
-                file_content=pdf_content,
-                file_name=file_name,
-                folder="jd_pdfs"
-            )
+            logger.info("[Step 1/6] Uploading PDF to S3...")
+            try:
+                s3_key = self.s3_service.upload_file(
+                    file_content=pdf_content,
+                    file_name=file_name,
+                    folder="jd_pdfs"
+                )
+                logger.info(f"PDF uploaded to S3: {s3_key}")
+            except Exception as e:
+                logger.error(f"S3 upload failed: {str(e)}", exc_info=True)
+                raise RuntimeError(f"Failed to upload PDF to S3: {str(e)}")
 
             # 2. PDF 파싱 및 청크 분할
-            print("\n[Step 2/5] Parsing PDF and creating chunks...")
-            parsed_result = self.jd_parser.parse_and_chunk(
-                pdf_content=pdf_content,
-                metadata={
-                    "company_id": company_id,
-                    "s3_key": s3_key,
-                    "file_name": file_name
-                }
-            )
+            logger.info("[Step 2/6] Parsing PDF and creating chunks...")
+            try:
+                parsed_result = self.jd_parser.parse_and_chunk(
+                    pdf_content=pdf_content,
+                    metadata={
+                        "company_id": company_id,
+                        "s3_key": s3_key,
+                        "file_name": file_name
+                    }
+                )
+                full_text = parsed_result["full_text"]
+                chunks = parsed_result["chunks"]
 
-            full_text = parsed_result["full_text"]
-            chunks = parsed_result["chunks"]
+                logger.info(f"PDF parsed successfully: {len(full_text)} chars, {len(chunks)} chunks")
+            except Exception as e:
+                logger.error(f"PDF parsing failed: {str(e)}", exc_info=True)
+                raise RuntimeError(f"Failed to parse PDF: {str(e)}")
 
-            print(f"  - Total text length: {len(full_text)} characters")
-            print(f"  - Number of chunks: {len(chunks)}")
-
-            # 2-1. JD에서 회사 가중치 및 역량 추출
-            print("\n[Step 2-1/6] Extracting competencies from JD...")
-            weights_data = None
+            # 3. RAG 기반 역량 추출
+            logger.info("[Step 3/6] Extracting competencies via RAG...")
+            rag_data = None
 
             try:
-                weights_data = await self._extract_company_weights(full_text)
-                print(f"  ✓ Competencies extracted: {len(weights_data.get('competencies', []))} competencies")
+                rag_data = await self.rag_agent.parse_jd(
+                    job_description=full_text,
+                    job_title=title
+                )
+                logger.info(
+                    f"RAG extraction completed: "
+                    f"{len(rag_data.get('required_skills', []))} required skills, "
+                    f"{len(rag_data.get('dynamic_evaluation_criteria', []))} evaluation criteria"
+                )
+            except ValueError as e:
+                logger.warning(f"RAG validation failed: {str(e)}")
+                logger.warning("Continuing without RAG data...")
+                rag_data = None
+            except RuntimeError as e:
+                logger.warning(f"RAG parsing failed: {str(e)}")
+                logger.warning("Continuing without RAG data...")
+                rag_data = None
             except Exception as e:
-                print(f"  ✗ Failed to extract company weights: {e}")
-                print(f"  → Continuing without weight extraction...")
-                weights_data = None
+                logger.error(f"Unexpected RAG error: {str(e)}", exc_info=True)
+                logger.warning("Continuing without RAG data...")
+                rag_data = None
 
-            if weights_data and "weights" in weights_data and Company:
-                # Company 테이블 업데이트 (Company 모델이 있는 경우에만)
-                try:
-                    company = db.query(Company).filter(Company.id == company_id).first()
-                    if company:
-                        company.category_weights = weights_data["weights"]
-                        # reasoning도 저장 (선택사항)
-                        if not company.company_culture_desc and "reasoning" in weights_data:
-                            company.company_culture_desc = str(weights_data.get("reasoning", {}))
-                        db.flush()
-                        print(f"  ✓ Company weights updated: {weights_data['weights']}")
-                    else:
-                        print(f"  ⚠ Company {company_id} not found, skipping weight update")
-                except Exception as e:
-                    print(f"  ⚠ Failed to update company weights: {e}")
-            else:
-                print("  ⚠ Skipping company weight update (no Company model or no weight data)")
-
-            # 2-2. 🆕 동적 Persona 생성
-            print("\n[Step 2-2/7] Generating interviewer persona from JD...")
+            # 4. 페르소나 생성 (RAG 결과 기반)
+            logger.info("[Step 4/6] Generating interviewer persona from RAG results...")
             persona_data = None
 
             try:
-                competencies = weights_data.get("competencies", []) if weights_data else []
-                persona_data = await self._generate_persona_from_jd(full_text, competencies)
+                persona_data = await self._generate_persona_from_jd(
+                    jd_text=full_text,
+                    rag_results=rag_data
+                )
                 if persona_data:
-                    print(f"  ✓ Persona generated: {persona_data.company_name} - {persona_data.job_title}")
+                    logger.info(
+                        f"Persona generated: {persona_data.company_name} - {persona_data.job_title}"
+                    )
                 else:
-                    print(f"  ⚠ Persona generation returned None")
+                    logger.warning("Persona generation returned None")
             except Exception as e:
-                print(f"  ✗ Failed to generate persona: {e}")
-                print(f"  → Continuing without persona data...")
+                logger.error(f"Persona generation failed: {str(e)}", exc_info=True)
+                logger.warning("Continuing without persona data...")
                 persona_data = None
 
-            # 3. Job 생성
-            print("\n[Step 3/7] Creating Job record...")
+            # 5. Job 생성
+            logger.info("[Step 5/6] Creating Job record with RAG and persona data...")
             job = Job(
                 company_id=company_id,
                 title=title,
                 description=full_text,
-                company_url=company_url  # 기업 URL 저장 (향후 파싱 예정)
+                company_url=company_url
             )
 
-            # 역량 정보 저장 (추출 성공 시)
-            if weights_data and "competencies" in weights_data:
-                # Job 테이블에 역량 정보 저장
-                job.dynamic_evaluation_criteria = weights_data.get("competencies", [])
-                job.competency_weights = weights_data.get("weights", {})
-                job.weights_reasoning = weights_data.get("reasoning", "")
-                print(f"  ✓ Stored {len(weights_data['competencies'])} competencies in Job")
+            # RAG 결과 저장
+            if rag_data:
+                job.dynamic_evaluation_criteria = rag_data.get("dynamic_evaluation_criteria", [])
+                job.competency_weights = rag_data.get("competency_weights", {})
+                job.required_skills = rag_data.get("required_skills", [])
+                job.preferred_skills = rag_data.get("preferred_skills", [])
+                job.domain_requirements = rag_data.get("domain_requirements", [])
+                job.position_type = rag_data.get("position_type", "unknown")
+                job.seniority_level = rag_data.get("seniority_level", "mid")
+                job.main_responsibilities = rag_data.get("main_responsibilities", [])
 
-            # 🆕 Persona 정보 저장 (생성 성공 시)
+                logger.info(
+                    f"Stored RAG data: {len(rag_data.get('dynamic_evaluation_criteria', []))} criteria, "
+                    f"{len(rag_data.get('required_skills', []))} required skills"
+                )
+
+            # Persona 저장
             if persona_data:
                 job.company_name = persona_data.company_name
                 job.job_title = persona_data.job_title
@@ -177,15 +215,14 @@ class JobService:
                 job.interviewer_tone = persona_data.interviewer_tone
                 job.initial_questions = persona_data.initial_questions
                 job.system_instruction = persona_data.system_instruction
-                print(f"  ✓ Stored persona data in Job")
+                logger.info("Stored persona data in Job")
 
             db.add(job)
-            db.flush()  # ID 생성을 위해 flush
-            print(f"  - Job created with ID: {job.id}")
+            db.flush()  # ID 생성
+            logger.info(f"Job created with ID: {job.id}")
 
-            # 4. 청크별 임베딩 생성
-            print("\n[Step 4/5] Generating embeddings for chunks...")
-            print(f"  - Total chunks to embed: {len(chunks)}")
+            # 6. 청크별 임베딩 생성 및 저장
+            logger.info(f"[Step 6/6] Generating embeddings for {len(chunks)} chunks...")
             chunk_texts = [chunk["chunk_text"] for chunk in chunks]
 
             try:
@@ -193,17 +230,16 @@ class JobService:
                     texts=chunk_texts,
                     batch_size=5  # API 제한 고려
                 )
+                logger.info(f"Embeddings generated successfully for {len(embeddings)} chunks")
             except Exception as e:
-                print(f"  ✗ Embedding generation failed: {e}")
-                raise Exception(f"Failed to generate embeddings: {str(e)}")
+                logger.error(f"Embedding generation failed: {str(e)}", exc_info=True)
+                raise RuntimeError(f"Failed to generate embeddings: {str(e)}")
 
-            # 5. JobChunk 저장
-            print("\n[Step 5/5] Saving chunks to database...")
+            # JobChunk 저장
             created_chunks = []
-
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 if embedding is None:
-                    print(f"  ⚠ Skipping chunk {i} (embedding failed)")
+                    logger.warning(f"Skipping chunk {i} (embedding is None)")
                     continue
 
                 job_chunk = JobChunk(
@@ -219,19 +255,20 @@ class JobService:
             db.commit()
             db.refresh(job)
 
-            print(f"\n{'='*60}")
-            print(f"✓ JD Processing completed successfully!")
-            print(f"  - Job ID: {job.id}")
-            print(f"  - Chunks saved: {len(created_chunks)}")
-            print(f"  - S3 Key: {s3_key}")
-            print(f"{'='*60}\n")
+            logger.info(
+                f"JD processing completed successfully: "
+                f"job_id={job.id}, chunks={len(created_chunks)}, s3_key={s3_key}"
+            )
 
             return job
 
+        except (ValueError, RuntimeError):
+            db.rollback()
+            raise
         except Exception as e:
             db.rollback()
-            print(f"\n✗ JD Processing failed: {e}")
-            raise Exception(f"Failed to process JD PDF: {str(e)}")
+            logger.error(f"Unexpected error in JD processing: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Failed to process JD PDF: {str(e)}")
 
     def get_job_with_chunks(
         self,
@@ -297,7 +334,7 @@ class JobService:
         from pgvector.sqlalchemy import cosine_distance
 
         # 쿼리 임베딩 생성
-        print(f"Generating embedding for query: {query_text[:100]}...")
+        logger.debug(f"Generating embedding for query preview: {query_text[:100]}...")
         query_embedding = self.embedding_service.generate_embedding(query_text)
 
         # 벡터 검색
@@ -350,223 +387,108 @@ class JobService:
             db.delete(job)
             db.commit()
 
-            print(f"✓ Job {job_id} deleted successfully")
+            logger.info(f"Job {job_id} deleted successfully")
             return True
 
         except Exception as e:
             db.rollback()
-            print(f"✗ Failed to delete job {job_id}: {e}")
+            logger.error(f"Failed to delete job {job_id}: {e}", exc_info=True)
             return False
 
-    async def _extract_company_weights(self, jd_text: str) -> Optional[Dict[str, Any]]:
-        """
-        JD 텍스트에서 회사의 핵심 역량 가중치 추출
-
-        멀티에이전트 평가 시스템과 연동을 위해 5개 고정 컨설팅 역량으로 매핑
-
-        Args:
-            jd_text: JD 전체 텍스트
-
-        Returns:
-            Dict: {
-                "weights": {...},
-                "reasoning": {...},
-                "competencies": [5개 고정 역량]
-            }
-        """
-        print(f"[_extract_company_weights] Starting competency extraction...")
-        try:
-            # 5개 고정 컨설팅 역량 (멀티에이전트 평가와 동일)
-            FIXED_COMPETENCIES = [
-                "Strategic Planning & Analysis (전략 기획 및 분석력)",
-                "Stakeholder Management (이해관계자 관리)",
-                "Project & Timeline Management (프로젝트 실행 관리)",
-                "Business Insight & Market Research (시장 조사 및 인사이트)",
-                "Data Management & Reporting (데이터 관리 및 보고)"
-            ]
-
-            prompt = f"""
-당신은 채용 공고(JD)를 분석하여 회사가 요구하는 역량을 평가하는 전문가입니다.
-
-다음 JD를 분석하여, 아래 **5개 컨설팅 직무 역량** 각각에 대해 이 JD가 얼마나 중요하게 요구하는지 점수(0-100)를 매기세요.
-
-**분석할 5개 역량:**
-1. Strategic Planning & Analysis (전략 기획 및 분석력)
-   - 전략 수립, 문제 분석, 의사결정, 논리적 사고
-2. Stakeholder Management (이해관계자 관리)
-   - 커뮤니케이션, 협업, 설득력, 관계 구축
-3. Project & Timeline Management (프로젝트 실행 관리)
-   - 일정 관리, 업무 조율, 실행력, 리소스 관리
-4. Business Insight & Market Research (시장 조사 및 인사이트)
-   - 시장 분석, 트렌드 파악, 고객 이해, 인사이트 도출
-5. Data Management & Reporting (데이터 관리 및 보고)
-   - 데이터 분석, 보고서 작성, 지표 관리, 결과 정리
-
-**JD:**
-{jd_text[:3000]}
-
-**응답 형식 (JSON):**
-{{
-  "competencies": [
-    {{
-      "name": "Strategic Planning & Analysis (전략 기획 및 분석력)",
-      "category": "technical",
-      "score": 85,
-      "description": "이 JD에서 이 역량이 중요한 이유"
-    }},
-    {{
-      "name": "Stakeholder Management (이해관계자 관리)",
-      "category": "cultural",
-      "score": 75,
-      "description": "..."
-    }},
-    ... (5개 모두)
-  ],
-  "category_weights": {{
-    "technical": 0.35,
-    "cultural": 0.30,
-    "experience": 0.20,
-    "leadership": 0.15
-  }},
-  "reasoning": "JD 전체 분석 요약"
-}}
-
-**중요:**
-- 반드시 위 5개 역량 모두에 대해 점수를 매기세요
-- 유효한 JSON만 반환하세요
-- category_weights의 합은 1.0이어야 합니다
-"""
-
-            print(f"[_extract_company_weights] Calling LLM with prompt length: {len(prompt)} chars")
-            response = await self.llm_client.generate(
-                prompt=prompt,
-                max_tokens=2000,
-                temperature=0.3
-            )
-            print(f"[_extract_company_weights] ✓ LLM response received, length: {len(str(response))} chars")
-
-            # JSON 파싱
-            import json
-            import re
-
-            print(f"[_extract_company_weights] Parsing LLM response...")
-
-            # response가 dict인 경우 (generate 메서드가 dict를 반환할 때)
-            if isinstance(response, dict):
-                if 'text' in response:
-                    response_text = response['text']
-                else:
-                    print(f"[_extract_company_weights] ⚠ Unexpected response format: {response}")
-                    response_text = str(response)
-            else:
-                response_text = str(response)
-
-            # JSON 추출 (```json ... ``` 형태인 경우 처리)
-            json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                # JSON 블록이 없으면 전체를 JSON으로 파싱 시도
-                json_str = response_text
-
-            try:
-                result = json.loads(json_str)
-                print(f"[_extract_company_weights] ✓ JSON parsed successfully")
-            except json.JSONDecodeError as e:
-                print(f"[_extract_company_weights] ✗ JSON parsing failed: {e}")
-                print(f"  Response preview: {response_text[:500]}...")
-                raise
-
-            # 5개 역량이 모두 있는지 검증
-            competencies = result.get("competencies", [])
-            if len(competencies) != 5:
-                print(f"[_extract_company_weights] ⚠ Warning: Expected 5 competencies, got {len(competencies)}")
-                # 부족한 역량은 기본값으로 채우기
-                existing_names = {c.get("name", "") for c in competencies}
-                for fixed_comp in FIXED_COMPETENCIES:
-                    if fixed_comp not in existing_names:
-                        competencies.append({
-                            "name": fixed_comp,
-                            "category": "technical",
-                            "score": 50,
-                            "description": "분석되지 않음"
-                        })
-
-            final_result = {
-                "weights": result.get("category_weights", {}),
-                "competencies": competencies[:5],  # 최대 5개만
-                "reasoning": result.get("reasoning", "")
-            }
-            print(f"[_extract_company_weights] ✓ Extraction completed: {len(final_result['competencies'])} competencies")
-            return final_result
-
-        except Exception as e:
-            print(f"[_extract_company_weights] ✗ Failed to extract company weights: {e}")
-            print(f"   Error type: {type(e).__name__}")
-            import traceback
-            print(f"   Traceback: {traceback.format_exc()}")
-            return None
+    # ==================== DEPRECATED: _extract_company_weights ====================
+    # This method has been replaced by RAGAgent.parse_jd()
+    # RAG provides more comprehensive JD analysis with required_skills,
+    # dynamic_evaluation_criteria, competency_weights, and more.
+    # ==============================================================================
 
     async def _generate_persona_from_jd(
         self,
         jd_text: str,
-        competencies: Optional[List[Dict]] = None
+        rag_results: Optional[Dict[str, Any]] = None
     ) -> Optional[InterviewerPersona]:
         """
-        JD 텍스트에서 면접관 페르소나를 동적으로 생성
+        JD 텍스트와 RAG 결과에서 면접관 페르소나를 동적으로 생성
 
         Args:
             jd_text: JD 전체 텍스트
-            competencies: 추출된 직무 역량 리스트 (선택)
+            rag_results: RAG 추출 결과 (required_skills, dynamic_evaluation_criteria, competency_weights 등)
 
         Returns:
             InterviewerPersona: 면접관 페르소나 정보 또는 None
+
+        Raises:
+            RuntimeError: 페르소나 생성 실패
         """
-        print(f"[_generate_persona_from_jd] Starting persona generation...")
+        logger.info("Starting persona generation with RAG results...")
 
         try:
-            # 역량 정보 포맷팅
-            competencies_text = ""
-            if competencies:
-                competencies_text = "\n".join([
-                    f"- {comp.get('name', 'Unknown')}: {comp.get('description', '')}"
-                    for comp in competencies[:5]
-                ])
+            # RAG 결과 포맷팅
+            rag_context = ""
+            if rag_results:
+                # 필수 스킬
+                required_skills = rag_results.get("required_skills", [])
+                if required_skills:
+                    rag_context += f"\n**필수 기술 스킬:**\n{', '.join(required_skills[:10])}\n"
+
+                # 우대 스킬
+                preferred_skills = rag_results.get("preferred_skills", [])
+                if preferred_skills:
+                    rag_context += f"\n**우대 기술 스킬:**\n{', '.join(preferred_skills[:5])}\n"
+
+                # 평가 기준
+                criteria = rag_results.get("dynamic_evaluation_criteria", [])
+                if criteria:
+                    rag_context += f"\n**핵심 평가 기준:**\n"
+                    for i, criterion in enumerate(criteria[:5], 1):
+                        rag_context += f"{i}. {criterion}\n"
+
+                # 직무 정보
+                position_type = rag_results.get("position_type", "")
+                seniority_level = rag_results.get("seniority_level", "")
+                if position_type or seniority_level:
+                    rag_context += f"\n**직무 정보:** {position_type} ({seniority_level} 레벨)\n"
+
+                # 주요 업무
+                responsibilities = rag_results.get("main_responsibilities", [])
+                if responsibilities:
+                    rag_context += f"\n**주요 업무:**\n"
+                    for i, resp in enumerate(responsibilities[:5], 1):
+                        rag_context += f"{i}. {resp}\n"
+
+                logger.debug(f"RAG context formatted: {len(rag_context)} chars")
             else:
-                competencies_text = "(역량 정보 없음)"
+                rag_context = "(RAG 분석 결과 없음)"
+                logger.warning("No RAG results provided for persona generation")
 
             prompt = f"""
 당신은 채용 공고(JD)를 분석하여 AI 면접관 페르소나를 생성하는 전문가입니다.
 
-다음 JD를 분석하여 면접관 페르소나를 생성하세요.
+다음 JD와 RAG 분석 결과를 바탕으로 면접관 페르소나를 생성하세요.
 
-**JD:**
-{jd_text[:3000]}
+**JD 텍스트 (요약):**
+{jd_text[:2000]}
 
-**추출된 핵심 역량:**
-{competencies_text}
+**RAG 분석 결과:**
+{rag_context}
 
-**요구사항:**
-1. **company_name**: JD에서 회사명을 추출하세요. 없으면 "미상" 또는 "기업"으로 표기
-2. **job_title**: 구체적인 직무명 (예: "백엔드 엔지니어", "상품기획(MD)")
-3. **interviewer_identity**: 면접관의 정체성 (예: "OO부문 15년 차 시니어 채용 담당자", "기술팀 리드")
-4. **interviewer_name**: 가상의 면접관 이름 (예: "김OO 책임", "이OO 매니저")
-5. **interviewer_tone**: 면접관의 말투와 스타일 (3-5개 항목)
-   - 예: ["전문적이고 정중함", "논리적 근거를 중시함", "구체적인 예시를 재질문함"]
-6. **initial_questions**: 면접 시작 질문 3-5개
-   - 회사와 직무에 특화된 질문
-   - 지원자의 경험과 동기를 파악하는 질문
-   - 해당 직무의 핵심 역량을 평가하는 질문
-7. **system_instruction**: 면접관 시스템 지시사항 (1-2문장)
-   - 예: "당신은 면접관입니다. 지원자의 경험이 우리 회사의 JD와 얼마나 일치하는지 검증하세요."
+**생성할 페르소나 정보:**
+1. **company_name**: JD에서 회사명 추출. 없으면 "미상" 또는 "기업"
+2. **job_title**: 구체적인 직무명 (예: "백엔드 엔지니어", "데이터 분석가")
+3. **interviewer_identity**: 면접관 정체성 (예: "기술팀 15년 차 시니어 채용 담당자")
+4. **interviewer_name**: 가상 면접관 이름 (예: "김OO 책임")
+5. **interviewer_tone**: 면접 스타일 3-5개 (예: ["전문적이고 정중함", "논리적 근거 중시"])
+6. **initial_questions**: RAG 분석 결과의 핵심 평가 기준과 필수 스킬을 반영한 면접 시작 질문 3-5개
+   - 일반적 질문이 아닌, 직무와 기술 스택에 특화된 질문
+   - 필수 기술과 평가 기준을 검증하는 질문
+7. **system_instruction**: 면접관 시스템 지시사항 1-2문장
 
 **중요:**
-- 회사와 직무에 맞는 구체적이고 현실적인 페르소나를 생성하세요
-- 면접 질문은 일반적인 질문이 아닌, 해당 직무와 회사에 특화된 질문이어야 합니다
-- 한국어로 작성하세요
+- RAG 분석 결과를 적극 반영하여 구체적이고 현실적인 페르소나 생성
+- 면접 질문은 필수 기술과 평가 기준에 기반해야 함
+- 한국어로 작성
 """
 
-            print(f"[_generate_persona_from_jd] Calling OpenAI with structured output...")
+            logger.debug(f"Calling OpenAI with prompt length: {len(prompt)} chars")
 
             # OpenAI API 직접 호출 (Pydantic Structured Output)
             from openai import AsyncOpenAI
@@ -579,7 +501,7 @@ class JobService:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are an expert in creating interviewer personas from job descriptions."
+                        "content": "You are an expert in creating interviewer personas from job descriptions and RAG analysis results."
                     },
                     {
                         "role": "user",
@@ -594,16 +516,15 @@ class JobService:
             # Pydantic 모델로 자동 파싱됨
             persona = response.choices[0].message.parsed
 
-            print(f"[_generate_persona_from_jd] ✓ Persona generated successfully")
-            print(f"  - Company: {persona.company_name}")
-            print(f"  - Job Title: {persona.job_title}")
-            print(f"  - Initial Questions: {len(persona.initial_questions)} questions")
+            logger.info(
+                f"Persona generated successfully: "
+                f"company={persona.company_name}, "
+                f"job={persona.job_title}, "
+                f"questions={len(persona.initial_questions)}"
+            )
 
             return persona
 
         except Exception as e:
-            print(f"[_generate_persona_from_jd] ✗ Failed to generate persona: {e}")
-            print(f"   Error type: {type(e).__name__}")
-            import traceback
-            print(f"   Traceback: {traceback.format_exc()}")
-            return None
+            logger.error(f"Failed to generate persona: {str(e)}", exc_info=True)
+            raise RuntimeError(f"Persona generation failed: {str(e)}")
