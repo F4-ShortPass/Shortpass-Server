@@ -11,7 +11,6 @@ import logging
 from services.s3_service_factory import get_s3_service
 from services.evaluation_pipeline_service import EvaluationPipelineService
 from pydantic import BaseModel
-from services.interview_service_v3 import interview_service_v3
 from services.interview_service_v4 import interview_service_v4
 
 router = APIRouter()
@@ -188,8 +187,7 @@ async def websocket_endpoint(
 
     await websocket.accept()
 
-    try: # v3 : 테스트용 / v4 : 실제 로직
-        # await interview_service_v3.handle_interview_session(websocket, interview_id)
+    try:
         await interview_service_v4.handle_interview_session(websocket, interview_id, applicant_id) 
 
     except WebSocketDisconnect:
