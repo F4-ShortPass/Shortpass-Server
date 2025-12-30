@@ -21,9 +21,9 @@ class SttTtsTranslator:
         try:
             self.polly = boto3.client('polly', region_name=self.region)
             self.transcribe = boto3.client('transcribe',region_name=self.region)
-            print("✅ [Translator] AWS Polly & Transcribe 연결 성공")
+            print("[Translator] AWS Polly & Transcribe connected successfully")
         except Exception as e:
-            print(f"❌ [Translator] 초기화 실패: {e}")
+            print(f"[Translator] Initialization failed: {e}")
         
     # 준비된 질문 텍스트 s3에 업로드 -> s3 url 반환
     def text_to_audio(self, text: str, folder: str) -> str:
@@ -52,7 +52,7 @@ class SttTtsTranslator:
                     with open(local_path, "wb") as file:
                         file.write(stream.read())
             else:
-                print("❌ [TTS] polly 응답 오류로 MP3 생성 실패")
+                print("[TTS] Polly response error - MP3 generation failed")
                 return None
 
             # S3 업로드
@@ -61,7 +61,7 @@ class SttTtsTranslator:
             return url
 
         except Exception as e:
-            print(f"❌ [TTS] 처리 중 에러 발생: {e}")
+            print(f"[TTS] Error occurred: {e}")
             return None
         finally:
             # 로컬 임시 파일 삭제 (Clean up)
@@ -77,7 +77,7 @@ class SttTtsTranslator:
         """
 
         if not os.path.exists(local_path):
-            print(f"❌ [STT] 로컬 파일 찾을 수 없음: {local_path}")
+            print(f"[STT] Local file not found: {local_path}")
             return None
         
         try:
@@ -91,7 +91,7 @@ class SttTtsTranslator:
                 s3_key = key_part.split("?")[0]
             
             if not s3_key:
-                print("❌ [STT] S3 URL 파싱 실패. Transcribe 요청 불가.")
+                print("[STT] S3 URL parsing failed. Cannot request Transcribe.")
                 return None
             
             audio_url = f"s3://{self.bucket_name}/{s3_key}"
@@ -123,11 +123,11 @@ class SttTtsTranslator:
                 
                 return transcript
             else:
-                print(f"❌ [STT] 변환 실패: {status['TranscriptionJob'].get('FailureReason')}")
+                print(f"[STT] Transcription failed: {status['TranscriptionJob'].get('FailureReason')}")
                 return None
 
         except Exception as e:
-            print(f"❌ [STT] 처리 중 에러: {e}")
+            print(f"[STT] Error occurred: {e}")
             return None
 
 stt_tts_translator = SttTtsTranslator()

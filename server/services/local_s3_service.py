@@ -20,7 +20,7 @@ class LocalS3Service:
         self.base_path = Path(base_path)
         # 기본 경로가 존재하지 않으면 생성
         self.base_path.mkdir(parents=True, exist_ok=True)
-        print(f"🗂️  LocalS3Service initialized. Storage path: {self.base_path.resolve()}")
+        print(f"[LocalS3Service] Initialized. Storage path: {self.base_path.resolve()}")
 
     def save_json_log(self, data: dict, s3_key: str) -> str:
         """
@@ -48,7 +48,7 @@ class LocalS3Service:
             with open(local_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
             
-            print(f"✅ Log saved locally: {local_path.resolve()}")
+            print(f"[LocalS3Service] Log saved locally: {local_path.resolve()}")
             return str(local_path.resolve())
 
         except (IOError, TypeError) as e:
@@ -76,7 +76,7 @@ class LocalS3Service:
             with open(local_path, 'wb') as f:
                 f.write(data)
             
-            print(f"✅ Binary log saved locally: {local_path.resolve()}")
+            print(f"[LocalS3Service] Binary log saved locally: {local_path.resolve()}")
             return str(local_path.resolve())
 
         except IOError as e:
