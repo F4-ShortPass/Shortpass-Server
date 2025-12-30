@@ -170,6 +170,7 @@ class InterviewSession(Base):
         id: 면접 세션 ID (PK)
         applicant_id: 지원자 ID
         company_id: 회사 ID (FK) - 단일 회사
+        job_id: 채용 공고 ID (FK)
         status: 면접 상태 (pending, in_progress, completed, failed)
         current_question_index: 현재 질문 인덱스
         current_persona_index: 현재 페르소나 인덱스 (순차 진행)
@@ -182,6 +183,7 @@ class InterviewSession(Base):
     id = Column(Integer, primary_key=True, index=True)
     applicant_id = Column(Integer, nullable=False, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    job_id = Column(Integer, ForeignKey("jobs.id"), nullable=True, index=True)
     status = Column(Enum(InterviewStatus), default=InterviewStatus.PENDING, nullable=False)
     current_question_index = Column(Integer, default=0, nullable=False)
     current_persona_index = Column(Integer, default=0, nullable=False)  # 현재 진행 중인 페르소나 순서
