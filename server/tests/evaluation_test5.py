@@ -146,7 +146,7 @@ async def test_full_evaluation():
                 return int(value)
             if isinstance(value, (int, float)):
                 return int(value)
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             pass
         return default
 
