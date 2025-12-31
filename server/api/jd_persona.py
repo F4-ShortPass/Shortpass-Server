@@ -20,16 +20,6 @@ from ai.parsers.jd_parser import JDParser
 router = APIRouter(prefix="/jd-persona", tags=["JD Persona"])
 logger = logging.getLogger("uvicorn")
 
-# 페르소나 JSON 파일 로드
-PERSONA_JSON_PATH = Path(__file__).parent.parent / "assets" / "persona_data.json"
-PERSONA_DATA = {}
-try:
-    with open(PERSONA_JSON_PATH, "r", encoding="utf-8") as f:
-        PERSONA_DATA = json.load(f)
-    logger.info(f"✅ 페르소나 JSON 로드 완료: {PERSONA_JSON_PATH}")
-except Exception as e:
-    logger.warning(f"⚠️ 페르소나 JSON 로드 실패: {e}")
-
 
 # Request/Response Models
 class CompetencyAnalysisResponse(BaseModel):
@@ -116,50 +106,40 @@ async def upload_jd_and_analyze(
 
         print(f"\n Starting JD upload and analysis: {pdf_file.filename}")
 
-        # ===== MOCK MODE - persona_data.json 활용 =====
-        # PDF 업로드는 받지만, persona_data.json에서 데이터 반환
+        # 1. PDF 파싱
+        jd_parser = JDParser()
+        jd_text = jd_parser.parse_pdf(pdf_content)
+        print(f"Extracted {len(jd_text)} characters from PDF")
 
-        mock_job_id = 1
+        # 2. Job 생성 및 저장
+        job_service = JobService()
+        job_result = await job_service.create_job_with_embeddings(
+            db=db,
+            company_id=company_id,
+            title=title,
+            jd_text=jd_text,
+            company_url=company_url
+        )
+        job_id = job_result["job_id"]
+        print(f"Job created with ID: {job_id}")
 
-        # persona_data.json에서 역량 데이터 로드
-        if PERSONA_DATA:
-            # 공통 역량: name만 추출
-            common_competencies = [
-                comp.get("name", comp.get("id", f"공통역량 {i+1}"))
-                for i, comp in enumerate(PERSONA_DATA.get("common_competencies", []))
-            ]
-            # 직무 역량: name만 추출
-            job_competencies = [
-                comp.get("name", comp.get("id", f"직무역량 {i+1}"))
-                for i, comp in enumerate(PERSONA_DATA.get("job_competencies", []))
-            ]
-            print(f"✅ persona_data.json에서 로드: 공통 {len(common_competencies)}개, 직무 {len(job_competencies)}개")
-        else:
-            # fallback
-            from services.competency_service import CompetencyService
-            common_competencies = CompetencyService.COMMON_COMPETENCIES
-            job_competencies = [
-                "매출·트렌드 데이터 분석 및 상품 기획 (MD 프로세스)",
-                "시즌 전략 수립 및 비즈니스 문제해결 (KPI 관리)",
-                "소싱·생산·유통 밸류체인 최적화 (원가·마진 관리)",
-                "고객 여정 설계 및 VMD·마케팅 통합 전략",
-                "유관부서 협업 및 이해관계자 협상 (디자인/생산/영업)"
-            ]
-            print(f"⚠️ Fallback 사용: 역량 {len(job_competencies)}개")
-
-        # 시각화 데이터 생성
+        # 3. 역량 분석
         competency_service = CompetencyService()
+        competency_data = await competency_service.analyze_jd_competencies(jd_text)
+        print(f"Extracted {len(competency_data['job_competencies'])} job-specific competencies")
+
+        # 4. 시각화 데이터 생성
         visualization_data = competency_service.get_competency_visualization_data(
-            job_competencies=job_competencies
+            job_competencies=competency_data["job_competencies"]
         )
 
         return CompetencyAnalysisResponse(
-            job_id=mock_job_id,
-            common_competencies=common_competencies,
-            job_competencies=job_competencies,
-            analysis_summary="삼성물산 패션부문 MD/영업 직무 핵심 역량 분석 완료 (Mock)",
+            job_id=job_id,
+            common_competencies=competency_data["common_competencies"],
+            job_competencies=competency_data["job_competencies"],
+            analysis_summary=competency_data.get("analysis_summary", "JD 역량 분석 완료"),
             visualization_data=visualization_data,
-            weights=parsed_weights  # 클라이언트 전달용 (mock)
+            weights=parsed_weights
         )
 
     except Exception as e:
@@ -195,8 +175,6 @@ async def generate_persona(
         if request.weights:
             logger.info(f"Using client-provided weights: {request.weights}")
 
-        # ===== MOCK MODE - persona_data.json 활용 =====
-
         # 기업 질문 검증
         if len(request.company_questions) != 3:
             raise HTTPException(
@@ -206,74 +184,39 @@ async def generate_persona(
 
         print(f"❓ Company questions received: {request.company_questions}")
 
+        # 1. Job 조회
+        job_service = JobService()
+        job_data = job_service.get_job_with_chunks(db, request.job_id)
+
+        if not job_data:
+            raise HTTPException(
+                status_code=404,
+                detail="Job not found"
+            )
+
+        # 2. JDPersona 서비스를 사용하여 페르소나 생성 및 저장
+        persona_service = JDPersonaService()
+        persona_result = await persona_service.create_and_save_persona(
+            db=db,
+            job_id=request.job_id,
+            company_id=job_data["company_id"],
+            jd_text=job_data["description"],
+            company_questions=request.company_questions
+        )
+
+        print(f"✅ Persona generated and saved for Job ID: {request.job_id}")
+
+        # 3. 응답 데이터 구성
         from datetime import datetime
-
-        # persona_data.json에서 데이터 로드
-        if PERSONA_DATA:
-            job_info = PERSONA_DATA.get("job_info", {})
-            persona_meta = PERSONA_DATA.get("persona_meta", {})
-
-            mock_company_name = job_info.get("company_name", "삼성물산 패션부문")
-            mock_common_competencies = [
-                comp.get("name", comp.get("id"))
-                for comp in PERSONA_DATA.get("common_competencies", [])
-            ]
-            mock_job_competencies = [
-                comp.get("name", comp.get("id"))
-                for comp in PERSONA_DATA.get("job_competencies", [])
-            ]
-
-            # 페르소나 요약 생성 (persona_meta 활용)
-            mock_persona_summary = [
-                {
-                    "type": persona_meta.get("identity", "시니어 면접관"),
-                    "name": persona_meta.get("name", "면접관"),
-                    "focus": "데이터 기반 의사결정 능력 및 전략적 문제해결 평가",
-                    "style": ", ".join(persona_meta.get("tone_and_manner", ["전문적", "논리적"])),
-                    "target_competencies": mock_job_competencies[:2]
-                },
-                {
-                    "type": "실행력 중심형 면접관",
-                    "focus": "목표 달성을 위한 창의적 실행과 협업 능력 평가",
-                    "style": "실무 경험과 구체적 성과를 중시",
-                    "target_competencies": mock_job_competencies[2:4] if len(mock_job_competencies) > 3 else mock_job_competencies
-                },
-                {
-                    "type": "글로벌 비즈니스형 면접관",
-                    "focus": "글로벌 감각과 비즈니스 마인드 평가",
-                    "style": "전략적 사고와 글로벌 시각을 평가",
-                    "target_competencies": mock_job_competencies[4:] if len(mock_job_competencies) > 4 else mock_job_competencies[-1:]
-                }
-            ]
-            print(f"✅ persona_data.json 기반 페르소나 생성 완료")
-        else:
-            # fallback
-            from services.competency_service import CompetencyService
-            mock_company_name = "삼성물산 패션부문"
-            mock_common_competencies = CompetencyService.COMMON_COMPETENCIES
-            mock_job_competencies = [
-                "매출·트렌드 데이터 분석 및 상품 기획",
-                "시즌 전략 수립 및 비즈니스 문제해결",
-                "소싱·생산·유통 밸류체인 최적화",
-                "고객 여정 설계 및 VMD·마케팅 통합 전략",
-                "유관부서 협업 및 이해관계자 협상"
-            ]
-            mock_persona_summary = [
-                {"type": "전략적 사고형", "focus": "데이터 기반 의사결정", "style": "논리적", "target_competencies": mock_job_competencies[:2]}
-            ]
-            print(f"⚠️ Fallback 페르소나 데이터 사용")
-
-        # 사용자가 입력한 3개 질문 사용
-        mock_core_questions = request.company_questions
 
         return PersonaResponse(
             job_id=request.job_id,
-            company=mock_company_name,
-            common_competencies=mock_common_competencies,
-            job_competencies=mock_job_competencies,
+            company=persona_result.get("company_name", "기업"),
+            common_competencies=persona_result.get("common_competencies", []),
+            job_competencies=persona_result.get("job_competencies", []),
             weights=request.weights,
-            core_questions=mock_core_questions,
-            persona_summary=mock_persona_summary,
+            core_questions=persona_result.get("core_questions", request.company_questions),
+            persona_summary=persona_result.get("persona_summary", []),
             created_at=datetime.now().isoformat()
         )
 
