@@ -13,7 +13,8 @@ from openai import OpenAI
 from utils.s3_uploader import upload_file_and_get_url
 from utils.stt_tts_translator import stt_tts_translator
 from db.database import SessionLocal
-from models.interview import InterviewSession
+from models.interview import InterviewSession, SessionPersona, PersonaInstance, PersonaDB, Company
+from models.job import Job
 
 logger = logging.getLogger(__name__)
 
@@ -81,58 +82,130 @@ class InterviewServiceV4:
             print(f"답변 품질 판단 실패: {e}")
             return True  # 에러 시에도 꼬리질문 실행 (더 안전)
 
-    def _load_persona_data(self):
+    def _load_session_personas_from_db(self, interview_id: int):
         """
-        3개 면접관이 정의된 persona_samsung_fashion.json 불러오기
+        데이터베이스에서 세션의 페르소나 정보 로드
+        SessionPersona -> PersonaInstance -> PersonaDB 순으로 조인
         """
         try:
-            # 우선 samsung_fashion 파일 시도
-            persona_file = Path(__file__).resolve().parent.parent / "assets" / "persona_samsung_fashion.json"
-            if not persona_file.exists():
-                # fallback: persona_data.json
-                persona_file = Path(__file__).resolve().parent.parent / "assets" / "persona_data.json"
+            db = SessionLocal()
 
-            if not persona_file.exists():
-                print(f"!!! 페르소나 파일이 없습니다")
+            # SessionPersona를 통해 해당 세션의 모든 페르소나 로드
+            session_personas = (
+                db.query(SessionPersona)
+                .filter(SessionPersona.session_id == interview_id)
+                .order_by(SessionPersona.order)  # 순서대로 정렬
+                .all()
+            )
+
+            if not session_personas:
+                print(f"!!! 세션 {interview_id}에 연결된 페르소나가 없습니다")
+                db.close()
                 return None
 
-            with open(persona_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                print(f"페르소나 로드: {persona_file.name}")
-                return data
-        except Exception as e:
-            print(f"!!! 페르소나 데이터 로드 실패: {e}")
-            return None
+            interviewers = []
+            for sp in session_personas:
+                # PersonaInstance 정보 로드
+                persona_instance = db.query(PersonaInstance).filter(
+                    PersonaInstance.id == sp.persona_instance_id
+                ).first()
 
-    def _get_interviewers(self, persona_data):
-        """
-        JSON에서 3개 면접관 정보 추출
-        """
-        if not persona_data:
-            return [{
-                "id": "DEFAULT",
-                "name": "면접관",
-                "type": "기본 면접관",
-                "tone": "전문적",
-                "focus": ["종합 평가"],
-                "questions": self.example_question_list
-            }]
+                if not persona_instance:
+                    print(f"Warning: PersonaInstance {sp.persona_instance_id} not found")
+                    continue
 
-        # interviewers 배열이 있으면 그대로 사용
-        interviewers = persona_data.get("interviewers", [])
-        if interviewers:
-            print(f"면접관 {len(interviewers)}명 로드됨")
+                # PersonaDB 템플릿 정보 로드
+                persona_template = db.query(PersonaDB).filter(
+                    PersonaDB.id == persona_instance.persona_template_id
+                ).first()
+
+                if not persona_template:
+                    print(f"Warning: PersonaDB {persona_instance.persona_template_id} not found")
+                    continue
+
+                # 면접관 정보 구성
+                interviewer = {
+                    "id": f"PERSONA_{persona_instance.id}",
+                    "name": persona_template.persona_name,
+                    "type": persona_instance.instance_name,
+                    "role": sp.role,
+                    "tone": persona_instance.question_tone or persona_template.style_description or "전문적",
+                    "focus": persona_template.focus_areas or [],
+                    "archetype": persona_template.archetype,
+                    "system_prompt": persona_template.system_prompt,
+                    "welcome_message": persona_template.welcome_message,
+                    "focus_keywords": persona_template.focus_keywords or [],
+                    "questions": [],  # 이력서 기반 질문으로 채워짐
+                    "target_competencies": []  # 평가 대상 역량
+                }
+
+                interviewers.append(interviewer)
+
+            db.close()
+            print(f"데이터베이스에서 {len(interviewers)}명의 면접관 로드 완료")
             return interviewers
 
-        # 없으면 기존 방식으로 fallback
+        except Exception as e:
+            print(f"!!! 데이터베이스에서 페르소나 로드 실패: {e}")
+            if 'db' in locals():
+                db.close()
+            return None
+
+    def _load_fallback_personas(self):
+        """
+        DB 로드 실패 시 기본 페르소나 반환 (fallback)
+        """
         return [{
             "id": "DEFAULT",
             "name": "면접관",
             "type": "기본 면접관",
+            "role": "primary",
             "tone": "전문적",
             "focus": ["종합 평가"],
-            "questions": persona_data.get("initial_questions", self.example_question_list)
+            "questions": self.example_question_list,
+            "target_competencies": []
         }]
+
+    def _load_company_info(self, interview_id: int):
+        """
+        InterviewSession에서 회사 정보 로드
+        """
+        try:
+            db = SessionLocal()
+
+            # InterviewSession 조회
+            session = db.query(InterviewSession).filter(
+                InterviewSession.id == interview_id
+            ).first()
+
+            if not session:
+                print(f"Warning: InterviewSession {interview_id} not found")
+                db.close()
+                return {}
+
+            # Company 정보 로드
+            company = db.query(Company).filter(
+                Company.id == session.company_id
+            ).first()
+
+            # Job 정보 로드 (있으면)
+            job = None
+            if session.job_id:
+                job = db.query(Job).filter(Job.id == session.job_id).first()
+
+            company_info = {
+                "company_name": company.name if company else "기업",
+                "job_title": job.title if job else "직무"
+            }
+
+            db.close()
+            return company_info
+
+        except Exception as e:
+            print(f"Warning: Failed to load company info: {e}")
+            if 'db' in locals():
+                db.close()
+            return {"company_name": "기업", "job_title": "직무"}
 
     def _load_resume_questions(self, applicant_id: int):
         """
@@ -181,10 +254,16 @@ class InterviewServiceV4:
         # 세션별 결과 버퍼 초기화
         self.interview_results = []
 
-        # 0. 페르소나 데이터 로드 (3개 면접관)
-        persona_data = self._load_persona_data() or {}
-        interviewers = self._get_interviewers(persona_data)
-        company_info = persona_data.get("company_info", {})
+        # 0. 데이터베이스에서 페르소나 데이터 로드
+        interviewers = self._load_session_personas_from_db(interview_id)
+
+        # DB 로드 실패 시 fallback 사용
+        if not interviewers:
+            print("Warning: DB persona load failed, using fallback")
+            interviewers = self._load_fallback_personas()
+
+        # company_info는 InterviewSession에서 로드
+        company_info = self._load_company_info(interview_id)
 
         # 0-1. 이력서 기반 맞춤 질문 로드 및 병합
         if applicant_id:
