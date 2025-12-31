@@ -32,7 +32,7 @@ class Job(Base):
     __tablename__ = "jobs"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
     title = Column(String(500), nullable=False)
     description = Column(Text, nullable=True)
     company_url = Column(String(500), nullable=True)  # 기업 웹사이트 URL (향후 파싱용)
@@ -60,8 +60,9 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    # Relationship to job_chunks
+    # Relationships
     chunks = relationship("JobChunk", back_populates="job", cascade="all, delete-orphan")
+    company = relationship("Company", foreign_keys=[company_id])
 
 
 class JobChunk(Base):

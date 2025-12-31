@@ -181,8 +181,8 @@ class InterviewSession(Base):
     __tablename__ = "interview_sessions"
 
     id = Column(Integer, primary_key=True, index=True)
-    applicant_id = Column(Integer, nullable=False, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    applicant_id = Column(Integer, ForeignKey("applicants.id", ondelete="CASCADE"), nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
     job_id = Column(Integer, ForeignKey("jobs.id"), nullable=True, index=True)
     status = Column(Enum(InterviewStatus), default=InterviewStatus.PENDING, nullable=False)
     current_question_index = Column(Integer, default=0, nullable=False)
@@ -199,6 +199,11 @@ class InterviewSession(Base):
     transcripts = relationship("SessionTranscript", back_populates="session", cascade="all, delete-orphan")
     scores = relationship("SessionScore", back_populates="session", cascade="all, delete-orphan")
     explanations = relationship("SessionExplanation", back_populates="session", cascade="all, delete-orphan")
+
+    # Foreign key relationships
+    job = relationship("Job", foreign_keys=[job_id])
+    applicant = relationship("Applicant", foreign_keys=[applicant_id])
+    company = relationship("Company", foreign_keys=[company_id])
 
 
 class InterviewResult(Base):

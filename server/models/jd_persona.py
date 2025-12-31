@@ -20,8 +20,8 @@ class JDPersona(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     # Job 정보
-    job_id = Column(Integer, index=True, nullable=False)  # Job과 연결
-    company_id = Column(Integer, index=True, nullable=False)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), index=True, nullable=False)  # Job과 연결
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), index=True, nullable=False)
 
     # 생성된 페르소나 데이터
     company_name = Column(String(255), nullable=True)

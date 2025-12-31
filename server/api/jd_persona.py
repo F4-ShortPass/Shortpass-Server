@@ -171,7 +171,7 @@ async def generate_persona(
     """
     logger.info(f"Generating persona for job ID: {request.job_id}")
     try:
-        print(f"\n🎭 Starting persona generation for Job ID: {request.job_id}")
+        print(f"\n Starting persona generation for Job ID: {request.job_id}")
         if request.weights:
             logger.info(f"Using client-provided weights: {request.weights}")
 
