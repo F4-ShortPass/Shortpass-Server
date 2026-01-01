@@ -28,16 +28,18 @@ def should_collaborate(state: EvaluationState) -> str:
         "final_integration": Final Integration으로 바로 진행
     """
     requires_collaboration = state.get("requires_collaboration", False)
+    low_confidence_list = state.get("low_confidence_list", [])
     
-    # 현재는 항상 Final Integration으로 직행 (Collaboration은 선택적)
-    # 추후 Collaboration 로직 구현 시 활성화 가능
+    print("\n[조건부 분기] Collaboration 필요 여부 판단...")
+    print(f"  - requires_collaboration: {requires_collaboration}")
+    print(f"  - Low Confidence 역량 수: {len(low_confidence_list)}")
     
-    # if requires_collaboration:
-    #     return "collaboration"
-    # else:
-    #     return "final_integration"
-    
-    return "final_integration"  # 현재는 항상 직행
+    if requires_collaboration and low_confidence_list:
+        print("  → 'collaboration' 노드로 진행")
+        return "collaboration"
+    else:
+        print("  → 'final_integration' 노드로 바로 진행")
+        return "final_integration"
 
 
 def create_evaluation_graph():
@@ -88,10 +90,8 @@ def create_evaluation_graph():
     
     # Collaboration → Final Integration
     graph.add_edge("collaboration", "final_integration")
-    
-    # Final Integration → END
-    graph.add_edge("final_integration", END)
-    
+
+    # Final Integration → Presentation Formatter → END
     graph.add_edge("final_integration", "presentation_formatter")
     graph.add_edge("presentation_formatter", END)
     
